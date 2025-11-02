@@ -1,0 +1,32 @@
+global:
+  # 全局抓取間隔
+  scrape_interval: 15s 
+
+scrape_configs:
+  # --- 1. Ingestion API 監控 (應用程式指標) ---
+  - job_name: 'ingestion-api'
+    static_configs:
+      - targets: ['ingestion:8000', 'ingestion-2:8000', 'ingestion-3:8000']
+
+  # --- 2. Nginx Exporter 監控 (系統性能指標) ---
+  - job_name: 'nginx-exporter'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+      
+  # --- 3. ML Exporter 監控 (LSTM 預測和 AI 策略) ---
+  - job_name: 'ml-metrics'
+    scrape_interval: 15s 
+    static_configs:
+      - targets: ['exporter:9188'] 
+    metrics_path: /metrics  # <--- 【關鍵修正】: metrics_path 必須與 static_configs 同一層級！
+
+    # ====== 新增：抓取 LSTM 預測結果 (通過自定義 Exporter) ======
+  - job_name: 'lstm_ml_predictions'
+    # 這裡使用 exporter 服務名稱和內部端口
+    static_configs:
+      - targets: ['exporter:9188'] 
+    # 這是為了在 Grafana 中識別數據來源
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: ml_prediction_data

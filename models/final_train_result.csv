@@ -1,0 +1,2 @@
+window,rmse_w,mape_percent,n_train,n_val
+60,1.611,0.62%,11172,2748

@@ -1,0 +1,9 @@
+fastapi
+
+uvicorn[standard]
+
+prometheus-client
+
+psycopg2-binary  # 使用預編譯版本，但仍建議保留系統編譯依賴
+
+python-multipart 

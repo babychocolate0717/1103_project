@@ -1,0 +1,196 @@
+version: '3.8'
+
+services:
+  # --- 1. Nginx 負載平衡器 ---
+  nginx:
+    build: ./nginx
+    container_name: nginx_balancer
+    ports:
+      - "8000:80"
+    depends_on:
+      - ingestion
+      - ingestion-2
+      - ingestion-3
+    restart: always
+
+  # --- Prometheus 監控 Nginx 的 Exporter ---
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: nginx_exporter
+    command: -nginx.scrape-uri http://nginx/stub_status
+    depends_on:
+      - nginx
+    restart: always
+
+  # --- 2. 資料庫服務 ---
+  db:
+    image: postgres:13
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: energy
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./ingestion-api/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d energy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- 3. 數據攝取 API 實例 (Ingestion API Instances) ---
+  ingestion:
+    build: { context: ./ingestion-api }
+    container_name: ingestion_api_1
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes: [./ingestion-api:/code]
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AUTH_SECRET_KEY=NTCUST-ENERGY-MONITOR
+      - COMPATIBILITY_MODE=true
+      - DATABASE_URL=postgresql://user:password@db:5432/energy
+    restart: always
+
+  ingestion-2:
+    build: { context: ./ingestion-api }
+    container_name: ingestion_api_2
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes: [./ingestion-api:/code]
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AUTH_SECRET_KEY=NTCUST-ENERGY-MONITOR  
+      - COMPATIBILITY_MODE=true  
+      - DATABASE_URL=postgresql://user:password@db:5432/energy
+    restart: always
+
+  ingestion-3:
+    build: { context: ./ingestion-api }
+    container_name: ingestion_api_3
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes: [./ingestion-api:/code]
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      - PYTHONUNBUFFERED=1
+      - AUTH_SECRET_KEY=NTCUST-ENERGY-MONITOR      
+      - COMPATIBILITY_MODE=true          
+      - DATABASE_URL=postgresql://user:password@db:5432/energy
+    restart: always
+
+  # --- 4. 數據清洗服務 (Cleaner API) ---
+  cleaner:
+    build: { context: ./cleaning-api }
+    container_name: cleaning_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
+    volumes: [./cleaning-api:/code]
+    ports: ["8100:8100"]
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/energy
+    restart: always
+    
+  # --- 5. 預測 API（讀取 /models 的最新模型） ---
+  prediction:
+    build:
+      context: ./prediction-api
+      dockerfile: Dockerfile
+      target: final
+    container_name: prediction_api
+    # 【關鍵修正】：移除 --reload 參數，確保 on_startup 事件穩定觸發
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+    env_file:
+      - ./prediction-api/.env
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://user:password@db:5432/energy  
+    volumes:
+      - ./prediction-api:/app
+      - modelstore:/models
+    ports:
+      - "8001:8000"
+    depends_on:
+      db: { condition: service_healthy }
+    restart: always
+
+  # --- 6. LSTM 訓練服務（手動觸發） ---
+  trainer:
+    build:
+      context: ./prediction-api
+      dockerfile: Dockerfile
+      target: final
+    container_name: lstm_trainer
+    working_dir: /training
+    command: ["python", "train_lstm_from_db.py"]
+    env_file:
+      - ./training/.env
+    environment:
+      - DB_URL=postgresql+psycopg2://user:password@db:5432/energy
+    volumes:
+      - ./training:/training
+      - modelstore:/models
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"  
+
+  # --- 7. 監控服務 (Prometheus) ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: always
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command: ['--config.file=/etc/prometheus/prometheus.yml']
+    depends_on:
+      - db
+      - nginx-exporter
+      - exporter 
+      
+  # --- 8. PostgreSQL ML Exporter (自定義服務) ---
+  exporter:
+    build: ./exporter
+    container_name: postgres_ml_exporter  
+    image: my-energy-exporter
+    # 將內部端口 9187 (Exporter) 映射到外部 9188
+    ports:
+      - "9188:9188"
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://user:password@db:5432/energy
+      # 告訴 Exporter 程式在哪裡找到查詢配置
+      - QUERY_PATH=/etc/postgres_exporter/queries.yaml
+    depends_on:
+      db: { condition: service_healthy }  
+    restart: always
+    volumes:
+      # 將主機上的配置檔映射到容器內
+      - ./exporter/exporter_queries:/etc/postgres_exporter/queries.yaml
+
+  # docker-compose.yml
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: always
+    ports: ["3001:3000"]
+    volumes: [grafana_storage:/var/lib/grafana]
+    depends_on: [prometheus]
+    environment:
+      # 【關鍵修正】：新增這一行來安裝 JSON API 插件
+      - GF_PANELS_DISABLE_SANITIZE_HTML=true
+      - GF_INSTALL_PLUGINS=marcusolsson-json-datasource
+
+volumes:
+  pgdata:
+  prometheus_data:
+  grafana_storage: {}
+  # 新增：用於共享模型檔案的卷
+  modelstore: {}
